@@ -111,7 +111,6 @@
   #messages::-webkit-scrollbar { width: 3px; }
   #messages::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 
-  .msg-group { display: flex; flex-direction: column; }
   .msg-row { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 2px; }
   .msg-row.me { flex-direction: row-reverse; }
 
@@ -221,16 +220,6 @@
     font-family: var(--font); cursor: pointer;
   }
 
-  /* firebase notice */
-  #notice {
-    position: fixed; top: 0; left: 0; right: 0; z-index: 300;
-    background: #1e1b2e; border-bottom: 1px solid var(--accent);
-    padding: 12px 16px; font-size: 13px; color: var(--accent2);
-    display: flex; align-items: flex-start; gap: 10px;
-  }
-  #notice a { color: var(--accent2); }
-  #notice-close { margin-left: auto; background: none; border: none; color: var(--muted); cursor: pointer; font-size: 18px; flex-shrink: 0; }
-
   @media (min-width: 640px) {
     #app { max-width: 600px; margin: 0 auto; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
     .config-sheet { border-radius: 24px; margin-bottom: 24px; }
@@ -239,18 +228,8 @@
 </head>
 <body>
 
-<!-- FIREBASE NOTICE -->
-<div id="notice">
-  <div>
-    <strong>⚡ ต้องตั้งค่า Firebase ก่อน</strong> — เปิดไฟล์นี้แล้วใส่ config ของคุณใน <code>FIREBASE_CONFIG</code> ด้านล่างไฟล์
-    <br><a href="https://console.firebase.google.com" target="_blank">→ สร้าง Firebase project ฟรีได้ที่นี่</a>
-    (ดูวิธีด้านล่างไฟล์)
-  </div>
-  <button id="notice-close" onclick="document.getElementById('notice').style.display='none'">✕</button>
-</div>
-
 <!-- SETUP -->
-<div id="setup" style="padding-top:60px">
+<div id="setup">
   <div class="setup-logo">💬</div>
   <div class="setup-title">VibeChat</div>
   <div class="setup-sub">แชทได้เลย ไม่ต้องสมัคร<br>ทุกคนเห็นข้อความพร้อมกัน</div>
@@ -320,298 +299,260 @@
   </div>
 </div>
 
-<!-- ================================================================
-  FIREBASE SDK
-================================================================ -->
-<script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getDatabase, ref, push, onValue, set, onDisconnect, serverTimestamp, off }
-  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+<!-- Socket.io (โหลดจาก server เดียวกัน) -->
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const AVATARS = ['🐱','🐶','🦊','🐸','🐼','🐨','🦁','🐯','🦋','🦄','🐙','🦖'];
+  const ROOMS = [
+    { id: 'general', label: '💬 ทั่วไป' },
+    { id: 'game',    label: '🎮 เกม' },
+    { id: 'music',   label: '🎵 ดนตรี' },
+    { id: 'art',     label: '🎨 ศิลปะ' },
+    { id: 'random',  label: '🎲 มั่ว' },
+  ];
 
-/* ════════════════════════════════════════════════════
-   👇 วางค่า Firebase config ของคุณตรงนี้
-   สร้างฟรีได้ที่ https://console.firebase.google.com
-   1. New project → Realtime Database → Start in test mode
-   2. Project settings → Your apps → Add web app → copy config
-   ════════════════════════════════════════════════════ */
-const FIREBASE_CONFIG = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
-  projectId: "YOUR_PROJECT",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
-};
+  let socket, currentRoom = 'general', myId, myName, myAvatar;
+  let typingTimer = null;
+  const typingUsers = {};
 
-/* ══════════════════════════════════════════════════ */
-
-const AVATARS = ['🐱','🐶','🦊','🐸','🐼','🐨','🦁','🐯','🦋','🦄','🐙','🦖'];
-const ROOMS = [
-  { id: 'general', label: '💬 ทั่วไป' },
-  { id: 'game',    label: '🎮 เกม' },
-  { id: 'music',   label: '🎵 ดนตรี' },
-  { id: 'art',     label: '🎨 ศิลปะ' },
-  { id: 'random',  label: '🎲 มั่ว' },
-];
-
-let app, db, currentRoom = 'general', myId, myName, myAvatar;
-let msgListener = null, onlineListener = null, typingTimer = null;
-
-/* ── Init Firebase ── */
-function initFirebase() {
-  try {
-    app = initializeApp(FIREBASE_CONFIG);
-    db = getDatabase(app);
-    return true;
-  } catch(e) {
-    console.error('Firebase init failed:', e);
-    return false;
-  }
-}
-
-/* ── Avatar grid ── */
-const grid = document.getElementById('avatar-grid');
-let selectedAvatar = AVATARS[0];
-AVATARS.forEach(em => {
-  const d = document.createElement('div');
-  d.className = 'av-opt' + (em === selectedAvatar ? ' selected' : '');
-  d.textContent = em;
-  d.onclick = () => {
-    selectedAvatar = em;
-    document.querySelectorAll('.av-opt').forEach(x => x.classList.remove('selected'));
-    d.classList.add('selected');
-  };
-  grid.appendChild(d);
-});
-
-/* ── Join ── */
-window.joinChat = function() {
-  const name = document.getElementById('name-field').value.trim();
-  if (!name) { document.getElementById('name-field').focus(); return; }
-  myName = name; myAvatar = selectedAvatar;
-  myId = 'u_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
-
-  if (!initFirebase() || FIREBASE_CONFIG.apiKey === 'YOUR_API_KEY') {
-    alert('⚠️ กรุณาใส่ Firebase config ก่อนนะคะ\nดูวิธีได้ในไฟล์ HTML ส่วน FIREBASE_CONFIG');
-    return;
-  }
-
-  localStorage.setItem('vc_name', myName);
-  localStorage.setItem('vc_avatar', myAvatar);
-
-  document.getElementById('notice').style.display = 'none';
-  document.getElementById('setup').style.display = 'none';
-  document.getElementById('app').style.display = 'flex';
-
-  buildRooms();
-  setupPresence();
-  switchRoom('general');
-};
-
-/* ── Rooms bar ── */
-function buildRooms() {
-  const bar = document.getElementById('rooms-bar');
-  bar.innerHTML = '';
-  ROOMS.forEach(r => {
-    const b = document.createElement('button');
-    b.className = 'room-chip' + (r.id === currentRoom ? ' active' : '');
-    b.textContent = r.label;
-    b.onclick = () => switchRoom(r.id);
-    bar.appendChild(b);
-  });
-}
-
-/* ── Switch room ── */
-function switchRoom(roomId) {
-  currentRoom = roomId;
-  document.querySelectorAll('.room-chip').forEach((b, i) => {
-    b.classList.toggle('active', ROOMS[i].id === roomId);
-  });
-  document.getElementById('messages').innerHTML = '';
-  if (msgListener) off(ref(db, `rooms/${currentRoom}/messages`));
-  listenMessages();
-}
-
-/* ── Listen messages ── */
-function listenMessages() {
-  const msgsRef = ref(db, `rooms/${currentRoom}/messages`);
-  msgListener = onValue(msgsRef, snap => {
-    const el = document.getElementById('messages');
-    el.innerHTML = '';
-    if (!snap.exists()) {
-      el.innerHTML = '<div class="sys-msg">ยังไม่มีข้อความ เริ่มแชทกันเลย! 🎉</div>';
-      return;
-    }
-    const msgs = [];
-    snap.forEach(child => msgs.push({ key: child.key, ...child.val() }));
-    msgs.forEach(m => renderMsg(m));
-    el.scrollTop = el.scrollHeight;
-  });
-}
-
-/* ── Render message ── */
-function renderMsg(m) {
-  const el = document.getElementById('messages');
-  const isMe = m.uid === myId;
-  const t = m.ts ? new Date(m.ts) : new Date();
-  const timeStr = t.getHours().toString().padStart(2,'0') + ':' + t.getMinutes().toString().padStart(2,'0');
-
-  if (m.type === 'system') {
+  /* ── Avatar grid ── */
+  const grid = document.getElementById('avatar-grid');
+  let selectedAvatar = AVATARS[0];
+  AVATARS.forEach(em => {
     const d = document.createElement('div');
-    d.className = 'sys-msg'; d.textContent = m.text;
-    el.appendChild(d); return;
+    d.className = 'av-opt' + (em === selectedAvatar ? ' selected' : '');
+    d.textContent = em;
+    d.onclick = () => {
+      selectedAvatar = em;
+      document.querySelectorAll('.av-opt').forEach(x => x.classList.remove('selected'));
+      d.classList.add('selected');
+    };
+    grid.appendChild(d);
+  });
+
+  /* ── Join ── */
+  window.joinChat = function() {
+    const name = document.getElementById('name-field').value.trim();
+    if (!name) { document.getElementById('name-field').focus(); return; }
+    myName = name;
+    myAvatar = selectedAvatar;
+
+    localStorage.setItem('vc_name', myName);
+    localStorage.setItem('vc_avatar', myAvatar);
+
+    document.getElementById('setup').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+
+    // เชื่อมต่อ Socket.io
+    socket = io();
+    myId = null;
+
+    socket.on('connect', () => {
+      myId = socket.id;
+      socket.emit('join', { name: myName, avatar: myAvatar, room: currentRoom });
+    });
+
+    socket.on('history', (msgs) => {
+      const el = document.getElementById('messages');
+      el.innerHTML = '';
+      if (!msgs || msgs.length === 0) {
+        el.innerHTML = '<div class="sys-msg">ยังไม่มีข้อความ เริ่มแชทกันเลย! 🎉</div>';
+        return;
+      }
+      msgs.forEach(m => renderMsg(m));
+      el.scrollTop = el.scrollHeight;
+    });
+
+    socket.on('message', (m) => {
+      renderMsg(m);
+      const el = document.getElementById('messages');
+      el.scrollTop = el.scrollHeight;
+    });
+
+    socket.on('online_count', (count) => {
+      document.getElementById('online-num').textContent = count;
+    });
+
+    socket.on('typing', ({ uid, name, isTyping }) => {
+      if (isTyping) {
+        typingUsers[uid] = name;
+      } else {
+        delete typingUsers[uid];
+      }
+      updateTypingUI();
+    });
+
+    socket.on('reaction_update', ({ msgId, reactions }) => {
+      updateReactions(msgId, reactions);
+    });
+
+    buildRooms();
+  };
+
+  /* ── Rooms bar ── */
+  function buildRooms() {
+    const bar = document.getElementById('rooms-bar');
+    bar.innerHTML = '';
+    ROOMS.forEach(r => {
+      const b = document.createElement('button');
+      b.className = 'room-chip' + (r.id === currentRoom ? ' active' : '');
+      b.textContent = r.label;
+      b.onclick = () => switchRoom(r.id);
+      bar.appendChild(b);
+    });
   }
 
-  const row = document.createElement('div');
-  row.className = 'msg-row ' + (isMe ? 'me' : 'other');
-
-  const av = document.createElement('div');
-  av.className = 'avatar-sm'; av.textContent = m.avatar || '🐱';
-
-  const col = document.createElement('div');
-  col.className = 'msg-col';
-
-  if (!isMe) {
-    const sn = document.createElement('div');
-    sn.className = 'msg-sender'; sn.textContent = m.name;
-    col.appendChild(sn);
+  /* ── Switch room ── */
+  function switchRoom(roomId) {
+    currentRoom = roomId;
+    document.querySelectorAll('.room-chip').forEach((b, i) => {
+      b.classList.toggle('active', ROOMS[i].id === roomId);
+    });
+    document.getElementById('messages').innerHTML = '';
+    document.getElementById('typing-area').innerHTML = '';
+    Object.keys(typingUsers).forEach(k => delete typingUsers[k]);
+    if (socket) socket.emit('switch_room', roomId);
   }
 
-  const bub = document.createElement('div');
-  bub.className = 'bubble ' + (isMe ? 'me' : 'other');
-  bub.textContent = m.text;
-  bub.ondblclick = () => addReaction(m.key, '❤️');
+  /* ── Render message ── */
+  function renderMsg(m) {
+    const el = document.getElementById('messages');
+    const isMe = m.uid === (myId || socket?.id);
+    const t = m.ts ? new Date(m.ts) : new Date();
+    const timeStr = t.getHours().toString().padStart(2,'0') + ':' + t.getMinutes().toString().padStart(2,'0');
 
-  const tm = document.createElement('div');
-  tm.className = 'msg-time'; tm.textContent = timeStr;
+    if (m.type === 'system') {
+      const d = document.createElement('div');
+      d.className = 'sys-msg'; d.textContent = m.text;
+      el.appendChild(d); return;
+    }
 
-  col.appendChild(bub);
-  col.appendChild(tm);
+    const row = document.createElement('div');
+    row.className = 'msg-row ' + (isMe ? 'me' : 'other');
+    row.dataset.msgId = m.id;
 
-  if (m.reactions) {
+    const av = document.createElement('div');
+    av.className = 'avatar-sm'; av.textContent = m.avatar || '🐱';
+
+    const col = document.createElement('div');
+    col.className = 'msg-col';
+
+    if (!isMe) {
+      const sn = document.createElement('div');
+      sn.className = 'msg-sender'; sn.textContent = m.name;
+      col.appendChild(sn);
+    }
+
+    const bub = document.createElement('div');
+    bub.className = 'bubble ' + (isMe ? 'me' : 'other');
+    bub.textContent = m.text;
+    bub.ondblclick = () => addReaction(m.id, '❤️');
+
+    const tm = document.createElement('div');
+    tm.className = 'msg-time'; tm.textContent = timeStr;
+
+    col.appendChild(bub);
+    col.appendChild(tm);
+
+    // reactions
     const reactDiv = document.createElement('div');
     reactDiv.className = 'reactions';
-    Object.entries(m.reactions).forEach(([emoji, users]) => {
+    reactDiv.dataset.msgId = m.id;
+    if (m.reactions) renderReactionPills(reactDiv, m.id, m.reactions);
+    col.appendChild(reactDiv);
+
+    row.appendChild(av);
+    row.appendChild(col);
+    el.appendChild(row);
+  }
+
+  /* ── Render reaction pills ── */
+  function renderReactionPills(reactDiv, msgId, reactions) {
+    reactDiv.innerHTML = '';
+    Object.entries(reactions).forEach(([emoji, users]) => {
       const count = Object.keys(users).length;
       if (count === 0) return;
+      const isMine = myId && users[myId];
       const pill = document.createElement('div');
-      pill.className = 'react-pill' + (users[myId] ? ' mine' : '');
+      pill.className = 'react-pill' + (isMine ? ' mine' : '');
       pill.innerHTML = `${emoji}<span class="react-count">${count}</span>`;
-      pill.onclick = () => addReaction(m.key, emoji);
+      pill.onclick = () => addReaction(msgId, emoji);
       reactDiv.appendChild(pill);
     });
-    col.appendChild(reactDiv);
   }
 
-  row.appendChild(av);
-  row.appendChild(col);
-  el.appendChild(row);
-}
-
-/* ── Send ── */
-window.sendMessage = async function() {
-  const input = document.getElementById('msg-input');
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = ''; input.style.height = 'auto';
-  await push(ref(db, `rooms/${currentRoom}/messages`), {
-    uid: myId, name: myName, avatar: myAvatar,
-    text, ts: Date.now()
-  });
-};
-
-/* ── Reactions ── */
-async function addReaction(msgKey, emoji) {
-  const rRef = ref(db, `rooms/${currentRoom}/messages/${msgKey}/reactions/${emoji}/${myId}`);
-  await set(rRef, true);
-}
-
-/* ── Typing indicator ── */
-document.getElementById('msg-input').addEventListener('input', function() {
-  this.style.height = 'auto';
-  this.style.height = Math.min(this.scrollHeight, 100) + 'px';
-  if (db) {
-    set(ref(db, `typing/${currentRoom}/${myId}`), { name: myName, ts: Date.now() });
-    clearTimeout(typingTimer);
-    typingTimer = setTimeout(() => set(ref(db, `typing/${currentRoom}/${myId}`), null), 2500);
+  /* ── Update reactions ── */
+  function updateReactions(msgId, reactions) {
+    const reactDiv = document.querySelector(`.reactions[data-msg-id="${msgId}"]`);
+    if (reactDiv) renderReactionPills(reactDiv, msgId, reactions);
   }
-});
 
-document.getElementById('msg-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey && window.innerWidth >= 640) {
-    e.preventDefault(); sendMessage();
+  /* ── Send ── */
+  window.sendMessage = function() {
+    const input = document.getElementById('msg-input');
+    const text = input.value.trim();
+    if (!text || !socket) return;
+    input.value = ''; input.style.height = 'auto';
+    socket.emit('message', { text });
+  };
+
+  /* ── Reactions ── */
+  function addReaction(msgId, emoji) {
+    if (!socket) return;
+    socket.emit('react', { msgId, emoji, room: currentRoom });
   }
-});
 
-/* ── Online presence ── */
-function setupPresence() {
-  const presRef = ref(db, `presence/${myId}`);
-  set(presRef, { name: myName, avatar: myAvatar, room: currentRoom, ts: Date.now() });
-  onDisconnect(presRef).remove();
-
-  onlineListener = onValue(ref(db, 'presence'), snap => {
-    const count = snap.exists() ? Object.keys(snap.val()).length : 0;
-    document.getElementById('online-num').textContent = count;
-  });
-
-  onValue(ref(db, `typing/${currentRoom}`), snap => {
+  /* ── Typing indicator ── */
+  function updateTypingUI() {
     const area = document.getElementById('typing-area');
-    if (!snap.exists()) { area.innerHTML = ''; return; }
-    const typers = Object.entries(snap.val())
-      .filter(([uid, v]) => uid !== myId && v && (Date.now() - v.ts < 4000))
-      .map(([,v]) => v.name);
-    if (typers.length === 0) { area.innerHTML = ''; return; }
-    area.innerHTML = `<div class="typing-dots"><span></span><span></span><span></span></div>${typers[0]} กำลังพิมพ์...`;
-  });
-}
+    const names = Object.values(typingUsers);
+    if (names.length === 0) { area.innerHTML = ''; return; }
+    area.innerHTML = `<div class="typing-dots"><span></span><span></span><span></span></div>${names[0]} กำลังพิมพ์...`;
+  }
 
-/* ── Helpers ── */
-window.addEmoji = (e) => {
-  const inp = document.getElementById('msg-input');
-  inp.value += e; inp.focus();
-};
-window.changeNamePrompt = () => {
-  document.getElementById('config-modal').classList.remove('open');
-  localStorage.removeItem('vc_name');
-  location.reload();
-};
-window.clearLocalAndReload = () => {
-  if (db) set(ref(db, `presence/${myId}`), null);
-  localStorage.clear(); location.reload();
-};
-
-/* ── Auto-fill from localStorage ── */
-const savedName = localStorage.getItem('vc_name');
-const savedAv = localStorage.getItem('vc_avatar');
-if (savedName) document.getElementById('name-field').value = savedName;
-if (savedAv) {
-  selectedAvatar = savedAv;
-  document.querySelectorAll('.av-opt').forEach(d => {
-    d.classList.toggle('selected', d.textContent === savedAv);
+  document.getElementById('msg-input').addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 100) + 'px';
+    if (socket) {
+      socket.emit('typing', { room: currentRoom, isTyping: true });
+      clearTimeout(typingTimer);
+      typingTimer = setTimeout(() => {
+        socket.emit('typing', { room: currentRoom, isTyping: false });
+      }, 2500);
+    }
   });
-}
+
+  document.getElementById('msg-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && window.innerWidth >= 640) {
+      e.preventDefault(); sendMessage();
+    }
+  });
+
+  /* ── Helpers ── */
+  window.addEmoji = (e) => {
+    const inp = document.getElementById('msg-input');
+    inp.value += e; inp.focus();
+  };
+  window.changeNamePrompt = () => {
+    document.getElementById('config-modal').classList.remove('open');
+    localStorage.removeItem('vc_name');
+    location.reload();
+  };
+  window.clearLocalAndReload = () => {
+    if (socket) socket.disconnect();
+    localStorage.clear(); location.reload();
+  };
+
+  /* ── Auto-fill from localStorage ── */
+  const savedName = localStorage.getItem('vc_name');
+  const savedAv = localStorage.getItem('vc_avatar');
+  if (savedName) document.getElementById('name-field').value = savedName;
+  if (savedAv) {
+    selectedAvatar = savedAv;
+    document.querySelectorAll('.av-opt').forEach(d => {
+      d.classList.toggle('selected', d.textContent === savedAv);
+    });
+  }
 </script>
-
-<!--
-════════════════════════════════════════════════════════════════
-  วิธีตั้งค่า Firebase (ทำครั้งเดียว ใช้ฟรีตลอด)
-════════════════════════════════════════════════════════════════
-
-1. ไปที่ https://console.firebase.google.com
-2. กด "Create a project" → ตั้งชื่อ → Next → Create Project
-3. ในหน้า project → ไปที่ "Realtime Database" (เมนูซ้าย)
-4. กด "Create Database" → เลือก region → "Start in test mode" → Enable
-5. ไปที่ Project Settings (ไอคอนเฟือง) → "Your apps" → "</>" (web)
-6. ตั้งชื่อ app → Register → copy firebaseConfig ที่ได้มา
-7. วางลงใน FIREBASE_CONFIG ในไฟล์นี้แทนค่า YOUR_... ทั้งหมด
-8. บันทึกไฟล์ → เปิดบนเว็บเซิร์ฟเวอร์ (หรือ drag ไปใส่ Netlify Drop)
-
-  โฮสต์ฟรีง่ายที่สุด:
-  → https://app.netlify.com/drop  (drag & drop ไฟล์ HTML เข้าไปเลย)
-  → ได้ URL แชร์เพื่อนได้เลย!
-
-════════════════════════════════════════════════════════════════
--->
 </body>
 </html>
